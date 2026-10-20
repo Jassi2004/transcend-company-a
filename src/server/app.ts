@@ -47,7 +47,8 @@ export function createApp(
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       if (
         req.get("origin") &&
-        new URL(req.get("origin")!).host !== req.get("host")
+        (!URL.canParse(req.get("origin")!) ||
+          new URL(req.get("origin")!).host !== req.get("host"))
       )
         return res
           .status(403)
@@ -71,6 +72,14 @@ export function createApp(
     db
       .prepare("SELECT * FROM services ORDER BY price")
       .all() as unknown as Service[];
+  const faultId = () =>
+    String(
+      (
+        db.prepare("SELECT value FROM settings WHERE key='faultId'").get() as {
+          value: string;
+        }
+      ).value,
+    );
   const bookings = () =>
     db
       .prepare(
@@ -97,6 +106,7 @@ export function createApp(
       version: "1.0.0",
       database: "connected",
       fault: fault(),
+      faultId: faultId(),
       timestamp: new Date().toISOString(),
     });
   });
@@ -243,21 +253,36 @@ export function createApp(
       )
         throw new HttpError(401, "A sandbox connector token is required.");
     }
-    const { kind, expectedFault } = z
+    const { kind, expectedFault, expectedFaultId } = z
       .object({
         kind: z.enum(["none", "capacity-regression", "dependency-unavailable"]),
         expectedFault: z.string().optional(),
+        expectedFaultId: z.string().min(1).max(100).optional(),
       })
       .strict()
       .parse(req.body);
-    if (expectedFault && fault() !== expectedFault)
-      throw new HttpError(
-        409,
-        "The fault changed after the proposal was captured.",
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (
+        (expectedFault && fault() !== expectedFault) ||
+        (expectedFaultId && faultId() !== expectedFaultId)
+      )
+        throw new HttpError(
+          409,
+          "The fault changed after the proposal was captured.",
+        );
+      db.prepare("UPDATE settings SET value=? WHERE key='fault'").run(kind);
+      const nextFaultId = randomUUID();
+      db.prepare("UPDATE settings SET value=? WHERE key='faultId'").run(
+        nextFaultId,
       );
-    db.prepare("UPDATE settings SET value=? WHERE key='fault'").run(kind);
-    recordEvent(db, "demo.fault", `Local fault changed to ${kind}`);
-    res.json({ fault: kind });
+      recordEvent(db, "demo.fault", `Local fault changed to ${kind}`);
+      db.exec("COMMIT");
+      res.json({ fault: kind, faultId: nextFaultId });
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   });
   app.use("/api", (_req, res) =>
     res.status(404).json({ error: "API route not found." }),

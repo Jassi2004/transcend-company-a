@@ -42,6 +42,7 @@ export function openDatabase(path: string) {
     "teal",
   );
   db.prepare("INSERT OR IGNORE INTO settings VALUES('fault','none')").run();
+  db.prepare("INSERT OR IGNORE INTO settings VALUES('faultId','')").run();
   return db;
 }
 export type DB = ReturnType<typeof openDatabase>;

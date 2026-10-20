@@ -207,3 +207,51 @@ test("cross-origin state changes and malformed JSON are rejected", async () => {
     db.close();
   }
 });
+
+test("a same-kind replacement fault cannot be reset with stale approval evidence", async () => {
+  const db = openDatabase(":memory:");
+  try {
+    const app = createApp(db, {
+      demoFaults: true,
+      sandboxToken: "connector-test",
+    });
+    const inject = () =>
+      request(app)
+        .post("/api/demo/fault")
+        .set("Authorization", "Bearer connector-test")
+        .send({ kind: "capacity-regression" });
+    const first = await inject();
+    const second = await inject();
+    assert.notEqual(first.body.faultId, second.body.faultId);
+    const stale = await request(app)
+      .post("/api/demo/fault")
+      .set("Authorization", "Bearer connector-test")
+      .send({
+        kind: "none",
+        expectedFault: "capacity-regression",
+        expectedFaultId: first.body.faultId,
+      });
+    assert.equal(stale.status, 409);
+    assert.equal(
+      (await request(app).get("/api/health")).body.faultId,
+      second.body.faultId,
+    );
+    const fresh = await request(app)
+      .post("/api/demo/fault")
+      .set("Authorization", "Bearer connector-test")
+      .send({
+        kind: "none",
+        expectedFault: "capacity-regression",
+        expectedFaultId: second.body.faultId,
+      });
+    assert.equal(fresh.status, 200);
+    assert.equal((await request(app).get("/api/health")).body.fault, "none");
+    assert.equal(
+      (await request(app).post("/api/bookings").set("Origin", "null").send({}))
+        .status,
+      403,
+    );
+  } finally {
+    db.close();
+  }
+});
